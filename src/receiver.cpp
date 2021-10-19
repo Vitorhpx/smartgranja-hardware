@@ -1,66 +1,22 @@
-#include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
-#include <Arduino.h>
+// #include <ESP8266WiFiMulti.h>
+// #include <Arduino.h>
 #include <Stream.h>
 #include <espnow.h>
-//AWS
-#include "sha256.h"
-#include "Utils.h"
-//WEBSockets
-#include <Hash.h>
-#include <WebSocketsClient.h>
-//MQTT PUBSUBCLIENT LIB
-#include <PubSubClient.h>
-//AWS MQTT Websocket
-#include "Client.h"
-#include "AWSWebSocketClient.h"
-#include "CircularByteBuffer.h"
+#include <FS.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h> //https://www.arduinolibraries.info/libraries/pub-sub-client
+#include <NTPClient.h>    //https://www.arduinolibraries.info/libraries/ntp-client
+#include <WiFiUdp.h>
 
-extern "C"
-{
-#include "user_interface.h"
-}
+// Update these with values suitable for your network.
+const char *ssid = "CovilBaleia";
+const char *password = "13371337";
 
-//AWS IOT config, change these:
-char wifi_ssid[] = "CovilBaleia";
-char wifi_password[] = "";
-char aws_endpoint[] = "a3f3ubc1y6ermt-ats.iot.us-east-2.amazonaws.com";
-char aws_key[] = "";
-char aws_secret[] = "";
-char aws_region[] = "us-east-2";
-const char *aws_topic = "esp8266/1/sample";
-int port = 443;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
-//MQTT config
-const int maxMQTTpackageSize = 512;
-const int maxMQTTMessageHandlers = 1;
+const char *AWS_endpoint = "a3f3ubc1y6ermt-ats.iot.us-east-2.amazonaws.com"; //MQTT broker ip
 
-ESP8266WiFiMulti WiFiMulti;
-AWSWebSocketClient awsWSclient(1000);
-PubSubClient client(awsWSclient);
-
-typedef struct struct_message
-{
-  float t; //temperature
-  float h; //humidity
-} struct_message;
-
-//# of connections
-long connection = 0;
-
-//generate random mqtt clientID
-char *generateClientID()
-{
-  char *cID = new char[23]();
-  for (int i = 0; i < 22; i += 1)
-    cID[i] = (char)random(1, 256);
-  return cID;
-}
-
-//count messages arrived
-int arrivedcount = 0;
-
-//callback to handle mqtt messages
 void callback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message arrived [");
@@ -73,57 +29,78 @@ void callback(char *topic, byte *payload, unsigned int length)
   Serial.println();
 }
 
-//connects to websocket layer and mqtt layer
-bool connect()
+WiFiClientSecure espClient;
+PubSubClient client(AWS_endpoint, 8883, callback, espClient); //set MQTT port number to 8883 as per //standard
+
+//============================================================================
+#define BUFFER_LEN 256
+long lastMsg = 0;
+char msg[BUFFER_LEN];
+int value = 0;
+byte mac[6];
+char mac_Id[18];
+//============================================================================
+
+void setup_wifi()
 {
-  if (client.connected())
+  delay(10);
+  // We start by connecting to a WiFi network
+  espClient.setBufferSizes(512, 512);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED)
   {
-    client.disconnect();
+    delay(500);
+    Serial.print(".");
   }
-
-  //delay is not necessary... it just help us to get a "trustful" heap space value
-  delay(1000);
-  Serial.print(millis());
-  Serial.print(" - conn: ");
-  Serial.print(++connection);
-  Serial.print(" - (");
-  Serial.print(ESP.getFreeHeap());
-  Serial.println(")");
-
-  //creating random client id
-  char *clientID = generateClientID();
-
-  client.setServer(aws_endpoint, port);
-  if (client.connect(clientID))
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+  timeClient.begin();
+  while (!timeClient.update())
   {
-    Serial.println("connected");
-    return true;
+    timeClient.forceUpdate();
   }
-  else
+  espClient.setX509Time(timeClient.getEpochTime());
+}
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected())
   {
-    Serial.print("failed, rc=");
-    Serial.print(client.state());
-    return false;
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ESPthing"))
+    {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      //client.publish("outTopic", "hello world");
+      // ... and resubscribe
+      client.subscribe("esp8266/1/sample");
+    }
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      char buf[256];
+      espClient.getLastSSLError(buf, 256);
+      Serial.print("WiFiClientSecure SSL error: ");
+      Serial.println(buf);
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
   }
 }
 
-//subscribe to a mqtt topic
-void subscribe()
+typedef struct struct_message
 {
-  client.setCallback(callback);
-  client.subscribe(aws_topic);
-  //subscript to a topic
-  Serial.println("MQTT subscribed");
-}
-
-//send a message to a mqtt topic
-void sendmessage()
-{
-  //send a message
-  char buf[100];
-  strcpy(buf, "{\"state\":{\"reported\":{\"on\": false}, \"desired\":{\"on\": false}}}");
-  int rc = client.publish(aws_topic, buf);
-}
+  float t; //temperature
+  float h; //humidity
+} struct_message;
 
 // Create a struct_message called myData
 struct_message myData;
@@ -145,11 +122,71 @@ void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len)
 
 void setup()
 {
-  // Initialize Serial Monitor
+
   Serial.begin(115200);
+  Serial.setDebugOutput(true);
 
   // Set device as a Wi-Fi Station
   WiFi.mode(WIFI_STA);
+
+  // initialize digital pin LED_BUILTIN as an output.
+  pinMode(LED_BUILTIN, OUTPUT);
+  setup_wifi();
+  delay(1000);
+  if (!SPIFFS.begin())
+  {
+    Serial.println("Failed to mount file system");
+    return;
+  }
+  Serial.print("Heap: ");
+  Serial.println(ESP.getFreeHeap());
+  // Load certificate file
+  File cert = SPIFFS.open("/cert.der", "r"); //replace cert.crt eith your uploaded file name
+  if (!cert)
+  {
+    Serial.println("Failed to open cert file");
+  }
+  else
+    Serial.println("Success to open cert file");
+  delay(1000);
+  if (espClient.loadCertificate(cert))
+    Serial.println("cert loaded");
+  else
+    Serial.println("cert not loaded");
+  // Load private key file
+  File private_key = SPIFFS.open("/private.der", "r"); //replace private eith your uploaded file name
+  if (!private_key)
+  {
+    Serial.println("Failed to open private cert file");
+  }
+  else
+    Serial.println("Success to open private cert file");
+  delay(1000);
+  if (espClient.loadPrivateKey(private_key))
+    Serial.println("private key loaded");
+  else
+    Serial.println("private key not loaded");
+  // Load CA file
+  File ca = SPIFFS.open("/ca.der", "r"); //replace ca eith your uploaded file name
+  if (!ca)
+  {
+    Serial.println("Failed to open ca ");
+  }
+  else
+    Serial.println("Success to open ca");
+  delay(1000);
+  if (espClient.loadCACert(ca, sizeof(ca) - 1))
+    Serial.println("ca loaded");
+  else
+    Serial.println("ca failed");
+  Serial.print("Heap: ");
+  Serial.println(ESP.getFreeHeap());
+  //===========================================================================
+  WiFi.macAddress(mac);
+  snprintf(mac_Id, sizeof(mac_Id), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  Serial.print(mac_Id);
+  //============================================================================
 
   // Init ESP-NOW
   if (esp_now_init() != 0)
@@ -166,6 +203,32 @@ void setup()
 
 void loop()
 {
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+  long now = millis();
+  if (now - lastMsg > 2000)
+  {
+    lastMsg = now;
+    //============================================================================
+    String macIdStr = mac_Id;
+    uint8_t randomNumber = random(20, 50);
+    String randomString = String(random(0xffff), HEX);
+    snprintf(msg, BUFFER_LEN, "{\"mac_Id\" : \"%s\", \"random_number\" : %d, \"random_string\" : \"%s\"}", macIdStr.c_str(), randomNumber, randomString.c_str());
+    Serial.print("Publish message: ");
+    Serial.println(msg);
+    //mqttClient.publish("outTopic", msg);
+    client.publish("esp8266/1/sample", msg);
+    //=============================================================================
+    Serial.print("Heap: ");
+    Serial.println(ESP.getFreeHeap()); //Low heap can cause problems
+  }
+  digitalWrite(LED_BUILTIN, HIGH); // turn the LED on (HIGH is the voltage level)
+  delay(100);                      // wait for a second
+  digitalWrite(LED_BUILTIN, LOW);  // turn the LED off by making the voltage LOW
+  delay(100);                      // wait for a second
 }
 
 // #include <ESP8266WiFi.h>
