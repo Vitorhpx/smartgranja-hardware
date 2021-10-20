@@ -73,11 +73,11 @@ void reconnect()
   {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("ESPthing"))
+    if (client.connect("920995cb-cf02-4de6-a6be-2a7f3a25801e"))
     {
       Serial.println("connected");
       // Once connected, publish an announcement...
-      //client.publish("outTopic", "hello world");
+      client.publish("outTopic", "hello world");
       // ... and resubscribe
       client.subscribe("esp8266/1/sample");
     }
@@ -175,7 +175,7 @@ void setup()
   else
     Serial.println("Success to open ca");
   delay(1000);
-  if (espClient.loadCACert(ca, sizeof(ca) - 1))
+  if (espClient.loadCACert(ca))
     Serial.println("ca loaded");
   else
     Serial.println("ca failed");
